@@ -3,6 +3,8 @@
 .env.*
 !.env.example
 .venv
+.venv.*
+!.venv.example
 
 # Data files
 data/
@@ -13,3 +15,8 @@ data/
 *.sqlite
 *.db
 *.pkl
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
