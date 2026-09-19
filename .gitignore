@@ -1,0 +1,14 @@
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Data files
+data/
+*.csv
+*.tsv
+*.xlsx
+*.parquet
+*.sqlite
+*.db
+*.pkl
