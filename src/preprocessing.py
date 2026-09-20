@@ -30,4 +30,17 @@ def lang_filter(text):
         return ""
 
 
+# Clean Text Pipeline
+def clean_text_pipeline(text):
+    if not isinstance(text,str):
+        return ""
+    text = html_stripping(text)
+    text = unicode_normalization(text)
+    text = remove_whitespaces(text)
+    text = lang_filter(text)
+    return text
+    
+    
+    
+    
     
