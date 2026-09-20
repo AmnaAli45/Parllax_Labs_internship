@@ -24,4 +24,10 @@ def remove_whitespaces(text):
 
 # Language Filtering
 def lang_filter(text):
+    if detect(text[:1000]) == 'en':# phle 1000 characters ko check krna kafi hai 
+        return text
+    else: 
+        return ""
+
+
     
