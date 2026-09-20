@@ -9,3 +9,4 @@ datasets
 json
 re
 langdetect
+pytest
