@@ -1,4 +1,5 @@
 import re
+from langdetect import detect
 
 # HTML Stripping
 
@@ -20,3 +21,7 @@ def remove_whitespaces(text):
     clean_text = re.sub(r" ?\n ?", "\n", clean_text)  # trim spaces around newlines
     clean_text = re.sub(r"\n{3,}", "\n\n", clean_text) #max one blank line between paragraphs
     return clean_text.strip()  
+
+# Language Filtering
+def lang_filter(text):
+    
