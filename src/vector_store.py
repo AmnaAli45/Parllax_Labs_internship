@@ -13,4 +13,10 @@ def add_chunks(collection, ids, texts, embeddings, metadatas=None):
         embeddings=embeddings,
         metadatas=metadatas,
     )
-    
+
+def semantic_search(collection, query_embedding, top_k=3):
+    results = collection.query(
+        query_embeddings=[query_embedding],
+        n_results=top_k,
+    )
+    return results   
