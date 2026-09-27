@@ -18,15 +18,22 @@ def chunk_text(text,chunk=300,overlap=50):
             end -=1 # word ko darmyan se cut nhi krna is lye peeche ale space tk jana hai 
         if end == start : # peeche koi bhi space nhi mila (aik hi lamba word hai)
             end = start + chunk
-        
+        chunked = text[start:end].strip()
+        if (end - start) <= overlap:
+            end = start + chunk
         chunked = text[start:end].strip()
         if chunked:
             chunks.append(chunked)
+
+        new_start = end - overlap
+        if new_start <= start:        
+            new_start = start + 1
+        start = new_start
         
         start = end - overlap # next chunk peeche wale se overlap krna hai 
     return chunks
 
-def chunk_dataset(input_path, output_path, chunk_size=300, overlap=50):
+def chunk_dataset(input_path, output_path, chunk=300, overlap=50):
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     total_docs = 0
     total_chunks = 0
@@ -39,7 +46,7 @@ def chunk_dataset(input_path, output_path, chunk_size=300, overlap=50):
             doc = json.loads(line)
             total_docs += 1
 
-            pieces = chunk_text(doc["text"], chunk_size=chunk_size, overlap=overlap)
+            pieces = chunk_text(doc["text"], chunk=chunk, overlap=overlap)
 
             for i, piece in enumerate(pieces):
                 chunk_record = {
@@ -57,5 +64,5 @@ def chunk_dataset(input_path, output_path, chunk_size=300, overlap=50):
 if __name__ == "__main__":
     RAW = "data/processed/clean_corpus.jsonl"      
     OUT = "data/processed/chunks.jsonl"           
-    chunk_dataset(RAW, OUT, chunk_size=300, overlap=50)
+    chunk_dataset(RAW, OUT, chunk=300, overlap=50)
         
