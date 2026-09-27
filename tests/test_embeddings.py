@@ -1,6 +1,5 @@
 from src.embeddings import embed_texts
 
-
 class FakeModel:
     def encode(self, texts, batch_size=32, show_progress_bar=False):
         return [[0.1, 0.2, 0.3] for _ in texts]
