@@ -1,6 +1,7 @@
 from sentence_transformers import SentenceTransformer
 from vector_store import get_collection, semantic_search
 from prompt import build_prompt
+from llm_clent import call_llm
 
 def retrieve_chunks(query, model, collection, top_k=3):
     query_vector = model.encode(query).tolist()
@@ -18,3 +19,9 @@ if __name__ == "__main__":
     messages = build_prompt(query, chunks)
     print("\nPrompt ready. User message preview:")
     print(messages[1]["content"][:200])
+    answer, error = call_llm(messages)
+
+    if error:
+            print("Error:", error)
+    else:
+            print("Answer:", answer)
