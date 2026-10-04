@@ -11,3 +11,4 @@ re
 langdetect
 pytest
 groq
+python-dotenv
