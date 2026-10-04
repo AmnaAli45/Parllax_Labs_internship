@@ -1,6 +1,6 @@
-# RAG Data Pipeline (Parallax Labs Internship)
+# RAG Pipeline (Parallax Labs Internship)
 
-A reproducible foundation for a Retrieval Augmented Generation (RAG) system. This document covers a verified Python environment, a modular text cleaning pipeline with unit tests, a validated clean corpus built from real Wikipedia articles, a chunking strategy, and how ChromaDB edge cases are handled.
+A reproducible foundation for a Retrieval Augmented Generation (RAG) system. This document covers a verified Python environment, a modular text cleaning pipeline with unit tests, a validated clean corpus built from real Wikipedia articles, a chunking strategy, ChromaDB edge case handling, an integrated LLM for answer generation, and end to end latency logging.
 
 ---
 
@@ -20,6 +20,11 @@ A reproducible foundation for a Retrieval Augmented Generation (RAG) system. Thi
 | ChromaDB setup, ingestion, and semantic search | `src/vector_store.py` |
 | Retrieval performance and latency testing script | `scripts/test_retrieval.py` |
 | Chunking strategy and ChromaDB edge case documentation | This document, Sections 10 and 11 |
+| LLM integration for answer generation (Groq) | `src/llm_client.py` |
+| Prompt engineering (system prompt and context injection) | `src/prompt_builder.py` |
+| Robust API error handling (rate limits, timeouts, oversized prompts) | `src/llm_client.py` |
+| Hallucination checks and out of domain query handling | `src/hallucination_guard.py` |
+| End to end latency logging (retrieval plus generation) | `scripts/generate_answer.py` |
 
 ---
 
@@ -29,17 +34,23 @@ A reproducible foundation for a Retrieval Augmented Generation (RAG) system. Thi
 .
 ├── README.md
 ├── requirements.txt              (pinned dependencies)
+├── .env                          (holds GROQ_API_KEY, not committed)
 ├── .gitignore                    (ignores venv/, .env, data/)
 ├── scripts/
 │   ├── verify_environment.py     (checks the environment works)
 │   ├── download_data.py          (downloads raw Wikipedia articles)
-│   └── test_retrieval.py         (tests retrieval latency for several queries)
+│   ├── test_retrieval.py         (tests retrieval latency for several queries)
+│   ├── test_groq.py              (simple check that the Groq API key and model work)
+│   └── generate_answer.py        (full pipeline: retrieve, check relevance, generate, log timing)
 ├── src/
 │   ├── __init__.py
 │   ├── preprocessing.py          (cleaning functions, corpus builder, validation)
 │   ├── chunking.py               (text chunking)
 │   ├── embeddings.py             (sentence embedding generation, timing)
-│   └── vector_store.py           (ChromaDB setup, ingestion, semantic search)
+│   ├── vector_store.py           (ChromaDB setup, ingestion, semantic search)
+│   ├── prompt_builder.py         (system prompt and context injection)
+│   ├── llm_client.py             (Groq API call with retries and error handling)
+│   └── hallucination_guard.py    (out of domain and refusal detection)
 ├── tests/
 │   ├── test_preprocessing.py     (unit tests for cleaning)
 │   └── test_chunking.py          (unit tests for chunking)
@@ -54,7 +65,7 @@ A reproducible foundation for a Retrieval Augmented Generation (RAG) system. Thi
 
 ## 3. Approach: environment
 
-All dependencies are pinned to exact versions in `requirements.txt` so every machine installs the same libraries: `sentence-transformers`, `torch`, `transformers`, `spacy`, `pandas`, `numpy`, `chromadb`, plus `langdetect` (language filtering), `datasets` (data download), and `pytest` (tests).
+All dependencies are pinned to exact versions in `requirements.txt` so every machine installs the same libraries: `sentence-transformers`, `torch`, `transformers`, `spacy`, `pandas`, `numpy`, `chromadb`, `groq`, `python-dotenv`, plus `langdetect` (language filtering), `datasets` (data download), and `pytest` (tests).
 
 `scripts/verify_environment.py` proves the environment works. It compares installed versions against `requirements.txt` and runs a small real operation with each library (a torch tensor sum, a spaCy tokenizer, an in memory ChromaDB insert and query, and so on).
 
@@ -200,7 +211,74 @@ This was the most important fix. Ingestion scripts get run again often, for exam
 
 ---
 
-## 12. Setup
+## 12. Approach: LLM integration
+
+`src/llm_client.py` sends the final prompt to an LLM through the Groq API and returns the generated answer.
+
+* Groq was chosen for its free tier and fast inference.
+* Model free tier availability changes over time. The model id used here is kept in a single constant, `MODEL_NAME`, at the top of `src/llm_client.py`, so it can be updated in one place if the provider retires a model. Always check `https://console.groq.com/docs/models` for the currently active production models before relying on a specific id, since using a retired model id causes a 404 Not Found or model decommissioned error.
+* During development, `llama-3.3-70b-versatile` returned a 404 error because Groq had retired it. The constant was updated to `openai/gpt-oss-120b`, which was confirmed live on Groq's documentation at the time of writing. `openai/gpt-oss-20b` is a faster, smaller alternative also available on the free tier.
+
+---
+
+## 13. Approach: prompt engineering
+
+`src/prompt_builder.py` builds the messages sent to the LLM, following two practices.
+
+### System prompt
+
+A fixed system prompt instructs the model to answer only from the provided context, to say it does not have enough information rather than guessing when the context does not cover the question, to avoid outside knowledge even if the model already knows the answer, and to keep answers short.
+
+### Context injection
+
+`build_prompt(query, chunks)` numbers each retrieved chunk as `[Context 1]`, `[Context 2]`, and so on, joins them into one context block, and places that block above the user's question in the user message. Numbering the chunks keeps them visually distinct, which makes it easier for the model to treat them as separate pieces of evidence rather than one continuous passage.
+
+---
+
+## 14. Approach: API error handling
+
+`src/llm_client.py` wraps the Groq API call in a retry loop and handles three categories of failure differently, since retrying is only useful for some of them.
+
+| Failure | Behaviour | Reason |
+|---|---|---|
+| Rate limit | Waits and retries, with the wait time doubling each attempt (2s, 4s, 8s) | The request is likely to succeed once the rate limit window resets, and a growing wait avoids hammering the API again immediately |
+| Timeout or connection error | Waits briefly and retries | Often a temporary network issue that resolves on its own |
+| Prompt too long (bad request) | Returns the error immediately without retrying | The request is structurally invalid and will fail the same way on every retry, so retrying only wastes time |
+| Any other API status error | Returns the error immediately | Not expected to resolve by retrying alone |
+
+After all retries are exhausted, the function returns a clear message rather than letting the exception propagate and crash the calling script. The function always returns a pair, the answer and an error, so the caller can check for a failure without a try block of its own.
+
+---
+
+## 15. Approach: hallucination checks and out of domain handling
+
+`src/hallucination_guard.py` adds two checks around the LLM call, since a model can state an unsupported answer confidently, and that risk grows when the retrieved chunks are not actually related to the question.
+
+### Out of domain detection, before calling the LLM
+
+ChromaDB returns a distance for each retrieved chunk, where a smaller distance means a closer match. `is_in_domain(distances)` checks whether the closest chunk is within a distance threshold. If even the best match is too far, the question is treated as outside the knowledge base, the LLM is never called, and a fixed message is returned instead. This saves the cost and time of a generation call that would likely produce an unsupported answer, and it directly reduces hallucination risk, since the model is never given irrelevant context to answer from.
+
+The threshold was chosen by testing a handful of clearly related and clearly unrelated queries against the corpus and noting where the distance separated the two groups. It should be rechecked on a different corpus or embedding model, since the right threshold depends on both.
+
+### Refusal detection, after calling the LLM
+
+Even when the context is relevant, the model may correctly say it cannot answer from what was given, which the system prompt explicitly allows. `is_refusal(answer_text)` checks the answer for phrases such as "I don't have enough information" and labels this case `refused_in_domain` rather than `answered`, so it is not mistaken for an error or a wrong answer when reviewing logs.
+
+---
+
+## 16. Approach: end to end latency logging
+
+`scripts/generate_answer.py` ties retrieval, the relevance check, and generation together in `answer_question()`, timing each stage separately with Python's `time` module.
+
+* Retrieval time covers embedding the query and querying ChromaDB.
+* Generation time covers building the prompt and calling the LLM. It is 0 for an out of domain query, since the LLM is never called in that case, and this is reported rather than omitted so it is clear the time was saved, not simply unmeasured.
+* Total time covers the whole call, from the start of retrieval to the final answer.
+
+Each result also carries a status, one of `answered`, `refused_in_domain`, `out_of_domain`, or `api_error`, so timing and outcome can be reviewed together across a batch of test queries.
+
+---
+
+## 17. Setup
 
 Requires Python 3.10 or newer (developed on `<YOUR_PYTHON_VERSION>`).
 
@@ -220,6 +298,10 @@ pip install -r requirements.txt
 
 # 4. Install the spaCy English model
 python -m spacy download en_core_web_sm
+
+# 5. Create a .env file in the project root with a Groq API key
+#    GROQ_API_KEY=your_key_here
+#    Get a free key at https://console.groq.com/keys
 ```
 
 If PowerShell blocks activation, run this once: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
@@ -228,7 +310,7 @@ Note that `torch` is large, several hundred megabytes on Linux and Windows, so t
 
 ---
 
-## 13. How to run
+## 18. How to run
 
 Always run commands from the project root.
 
@@ -258,6 +340,12 @@ python src/vector_store.py
 
 # 8. Test retrieval performance and log latency for several queries
 python scripts/test_retrieval.py
+
+# 9. Confirm the Groq API key and model work
+python scripts/test_groq.py
+
+# 10. Run the full pipeline: retrieve, check relevance, generate, and log end to end latency
+python scripts/generate_answer.py
 ```
 
 Using the cleaning functions in your own code:
@@ -269,9 +357,23 @@ clean_text_pipeline("<p>Hello&nbsp;   world, this is a short English sentence.</
 # returns cleaned text, or an empty string if the text is not English
 ```
 
+Using the full answer pipeline in your own code:
+
+```python
+from sentence_transformers import SentenceTransformer
+from src.vector_store import get_collection
+from src.generate_answer import answer_question
+
+model = SentenceTransformer("all-MiniLM-L6-v2")
+collection = get_collection()
+
+result = answer_question("What is deep learning?", model, collection)
+print(result["answer"], result["status"], result["total_ms"])
+```
+
 ---
 
-## 14. Results
+## 19. Results
 
 Environment verification:
 ```
@@ -303,6 +405,11 @@ Retrieval latency:
 <PASTE THE OUTPUT OF: python scripts/test_retrieval.py>
 ```
 
+Answer generation with end to end latency:
+```
+<PASTE THE OUTPUT OF: python scripts/generate_answer.py>
+```
+
 | Metric | Value |
 |---|---|
 | Raw documents | `<RAW_COUNT>` |
@@ -311,30 +418,35 @@ Retrieval latency:
 | Validation | PASSED |
 | Total chunks created | `<CHUNK_COUNT>` |
 | Average embedding speed | `<TEXTS_PER_SEC>` texts per second |
-| Average query latency | `<AVG_LATENCY_MS>` ms |
+| Average retrieval latency | `<AVG_RETRIEVAL_MS>` ms |
+| Average generation latency | `<AVG_GENERATION_MS>` ms |
+| Average end to end latency | `<AVG_TOTAL_MS>` ms |
 
 ---
 
-## 15. Design decisions and limitations
+## 20. Design decisions and limitations
 
 * `langdetect` is statistical. It can misjudge very short or mixed language text, so the pipeline only uses the first 1,000 characters, and validation checks a random sample rather than claiming complete accuracy.
 * NFKC normalization is lossy on purpose, for example superscripts and ligatures are flattened, which is good for search and embeddings but not suitable if the original typography must be preserved.
 * Only English is kept in this version. The target language is a single argument in `lang_filter`, so extending it is straightforward.
 * Fixed size chunking with a word safe cut is simple and predictable, though it does not understand sentence or paragraph structure the way a recursive splitter would. This trade off favours reliability and speed over perfectly natural chunk boundaries.
 * `upsert()` makes ingestion idempotent, meaning the script can be run again safely, at the cost of a small amount of extra write overhead compared to plain `add()`.
+* Free tier LLM model ids on Groq change over time, as seen firsthand when `llama-3.3-70b-versatile` returned a 404 error after being retired. The model id is kept in one constant, and the live model list should be checked before each deployment.
+* The out of domain distance threshold is a heuristic tuned by manual inspection, not a learned or formally validated value, so it may need adjustment for a different embedding model or a different corpus.
+* Retry logic adds latency to failed requests by design, since waiting before retrying a rate limited or temporarily unreachable request is deliberate, but this means a persistently failing request takes longer to report its final error than a request that fails once.
 
 ---
 
-## 16. About the data files
+## 21. About the data files
 
-Raw and processed data are git ignored, under `data/`, because they are large and reproducible. To regenerate them, run steps 2, 4, and 5 in Section 13. A 20 document preview of the cleaned output is committed in `samples/clean_corpus_sample.jsonl`.
+Raw and processed data are git ignored, under `data/`, because they are large and reproducible. To regenerate them, run steps 2, 4, and 5 in Section 18. A 20 document preview of the cleaned output is committed in `samples/clean_corpus_sample.jsonl`. The `.env` file holding the Groq API key is also git ignored and must be created locally.
 
 ---
 
-## 17. Tech stack
+## 22. Tech stack
 
-Python, sentence-transformers, PyTorch, Transformers, spaCy, pandas, NumPy, ChromaDB, langdetect, Hugging Face `datasets`, pytest.
+Python, sentence-transformers, PyTorch, Transformers, spaCy, pandas, NumPy, ChromaDB, langdetect, Hugging Face `datasets`, pytest, Groq, python-dotenv.
 
-## 18. Author
+## 23. Author
 
 Amna Ali, Parallax Labs Internship.
