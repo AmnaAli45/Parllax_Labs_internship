@@ -1,6 +1,6 @@
 from sentence_transformers import SentenceTransformer
-from src.vector_store import get_collection, semantic_search
-from src.prompt import build_prompt
+from vector_store import get_collection, semantic_search
+from prompt import build_prompt
 
 def retrieve_chunks(query, model, collection, top_k=3):
     query_vector = model.encode(query).tolist()
