@@ -10,3 +10,4 @@ json
 re
 langdetect
 pytest
+groq
