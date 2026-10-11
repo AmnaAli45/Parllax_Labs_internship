@@ -3,7 +3,7 @@ import json
 import random
 from pathlib import Path
 
-from src.sentiment_analysis import evaluate_accuracy
+from sentiment_analysis import evaluate_accuracy
 
 CHUNKS_PATH = "data/processed/chunks.jsonl"
 CSV_PATH = "sentiment_labeling.csv"
