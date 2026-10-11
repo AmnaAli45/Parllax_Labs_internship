@@ -1,5 +1,5 @@
 import json
-from src.topic_modeling import fit_topic_model
+from topic_modeling import fit_topic_model
 
 def manually_label_topics(topic_keywords):
     labeled = {}
