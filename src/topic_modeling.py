@@ -1,5 +1,6 @@
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.decomposition import LatentDirichletAllocation
+import json
 
 
 def fit_topic_model(texts, n_topics=5, n_top_words=8, min_df=2, max_df=0.9):
@@ -24,3 +25,15 @@ def assign_topics(texts, vectorizer, lda):
     doc_term_matrix = vectorizer.transform(texts)
     topic_distribution = lda.transform(doc_term_matrix)
     return topic_distribution.argmax(axis=1).tolist()
+
+if __name__ == "__main__":
+    texts = []
+    with open("data/processed/chunks.jsonl", encoding="utf-8") as f:
+        for line in f:
+            chunk = json.loads(line)
+            texts.append(chunk["text"])
+
+    vectorizer, lda, topic_keywords = fit_topic_model(texts, n_topics=10, n_top_words=10)
+
+    for tid, keywords in topic_keywords.items():
+        print(f"Topic {tid}: {keywords}")
