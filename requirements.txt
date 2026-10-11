@@ -12,3 +12,4 @@ langdetect
 pytest
 groq
 python-dotenv
+vaderSentiment
