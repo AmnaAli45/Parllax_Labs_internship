@@ -1,4 +1,5 @@
 import json
+from topic_modeling import fit_topic_model
 
 def is_too_short(text, min_words=15):
     word_count = len(text.split())
@@ -25,7 +26,6 @@ def safe_assign_topic(text, vectorizer, lda, min_words=15, min_coverage=0.15):
     return int(topic_id), "ok"
 
 if __name__ == "__main__":
-    from src.topic_modeling import fit_topic_model
 
     texts = []
     with open("data/processed/chunks.jsonl", encoding="utf-8") as f:
@@ -38,7 +38,7 @@ if __name__ == "__main__":
     print("Done training.")
 
     status_count = {}
-    for text in texts[:500]:   # pehle 500 par test karein, poora data time lega
+    for text in texts[:500]:   
         _, status = safe_assign_topic(text, vectorizer, lda)
         status_count[status] = status_count.get(status, 0) + 1
 
