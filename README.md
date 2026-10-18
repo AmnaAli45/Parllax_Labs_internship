@@ -1,6 +1,6 @@
 # RAG Pipeline (Parallax Labs Internship)
 
-A reproducible foundation for a Retrieval Augmented Generation (RAG) system. This document covers a verified Python environment, a modular text cleaning pipeline with unit tests, a validated clean corpus built from real Wikipedia articles, a chunking strategy, ChromaDB edge case handling, an integrated LLM for answer generation, and end to end latency logging.
+A reproducible foundation for a Retrieval Augmented Generation (RAG) system. This document covers a verified Python environment, a modular text cleaning pipeline with unit tests, a validated clean corpus built from real Wikipedia articles, a chunking strategy, ChromaDB edge case handling, an integrated LLM for answer generation, end to end latency logging, a FastAPI service wrapping the whole system, structured request logging with proper HTTP error responses, retrieval and generation evaluation scripts, and unit tests for the API itself.
 
 ---
 
@@ -25,6 +25,11 @@ A reproducible foundation for a Retrieval Augmented Generation (RAG) system. Thi
 | Robust API error handling (rate limits, timeouts, oversized prompts) | `src/llm_client.py` |
 | Hallucination checks and out of domain query handling | `src/hallucination_guard.py` |
 | End to end latency logging (retrieval plus generation) | `scripts/generate_answer.py` |
+| FastAPI application wrapping the RAG system | `src/main.py` |
+| Structured request logging and proper HTTP error responses | `src/main.py` |
+| Retrieval evaluation script (Precision@K and Recall@K) | `src/retrieval_eval.py`, `scripts/evaluate_retrieval.py` |
+| Automated end to end evaluation for generation quality and latency | `src/generation_eval.py`, `scripts/evaluate_generation.py` |
+| Unit tests for the FastAPI endpoints | `tests/test_main.py` |
 
 ---
 
@@ -41,7 +46,9 @@ A reproducible foundation for a Retrieval Augmented Generation (RAG) system. Thi
 │   ├── download_data.py          (downloads raw Wikipedia articles)
 │   ├── test_retrieval.py         (tests retrieval latency for several queries)
 │   ├── test_groq.py              (simple check that the Groq API key and model work)
-│   └── generate_answer.py        (full pipeline: retrieve, check relevance, generate, log timing)
+│   ├── generate_answer.py        (full pipeline: retrieve, check relevance, generate, log timing)
+│   ├── evaluate_retrieval.py     (runs Precision@K and Recall@K against a labeled test set)
+│   └── evaluate_generation.py    (runs the full pipeline against test queries, checks quality and latency)
 ├── src/
 │   ├── __init__.py
 │   ├── preprocessing.py          (cleaning functions, corpus builder, validation)
@@ -50,10 +57,14 @@ A reproducible foundation for a Retrieval Augmented Generation (RAG) system. Thi
 │   ├── vector_store.py           (ChromaDB setup, ingestion, semantic search)
 │   ├── prompt_builder.py         (system prompt and context injection)
 │   ├── llm_client.py             (Groq API call with retries and error handling)
-│   └── hallucination_guard.py    (out of domain and refusal detection)
+│   ├── hallucination_guard.py    (out of domain and refusal detection)
+│   ├── main.py                   (FastAPI app, structured logging, HTTP error handling)
+│   ├── retrieval_eval.py         (Precision@K and Recall@K calculations)
+│   └── generation_eval.py        (keyword based quality scoring, latency summary)
 ├── tests/
 │   ├── test_preprocessing.py     (unit tests for cleaning)
-│   └── test_chunking.py          (unit tests for chunking)
+│   ├── test_chunking.py          (unit tests for chunking)
+│   └── test_main.py              (unit tests for the FastAPI endpoints)
 ├── samples/
 │   └── clean_corpus_sample.jsonl (20 document sample of the cleaned output)
 └── data/                         (not committed, git ignored)
@@ -65,7 +76,7 @@ A reproducible foundation for a Retrieval Augmented Generation (RAG) system. Thi
 
 ## 3. Approach: environment
 
-All dependencies are pinned to exact versions in `requirements.txt` so every machine installs the same libraries: `sentence-transformers`, `torch`, `transformers`, `spacy`, `pandas`, `numpy`, `chromadb`, `groq`, `python-dotenv`, plus `langdetect` (language filtering), `datasets` (data download), and `pytest` (tests).
+All dependencies are pinned to exact versions in `requirements.txt` so every machine installs the same libraries: `sentence-transformers`, `torch`, `transformers`, `spacy`, `pandas`, `numpy`, `chromadb`, `groq`, `python-dotenv`, `fastapi`, `uvicorn`, `httpx`, plus `langdetect` (language filtering), `datasets` (data download), and `pytest` (tests).
 
 `scripts/verify_environment.py` proves the environment works. It compares installed versions against `requirements.txt` and runs a small real operation with each library (a torch tensor sum, a spaCy tokenizer, an in memory ChromaDB insert and query, and so on).
 
@@ -235,7 +246,7 @@ A fixed system prompt instructs the model to answer only from the provided conte
 
 ---
 
-## 14. Approach: API error handling
+## 14. Approach: API error handling in the LLM client
 
 `src/llm_client.py` wraps the Groq API call in a retry loop and handles three categories of failure differently, since retrying is only useful for some of them.
 
@@ -278,7 +289,53 @@ Each result also carries a status, one of `answered`, `refused_in_domain`, `out_
 
 ---
 
-## 17. Setup
+## 17. Approach: FastAPI application
+
+`src/main.py` wraps the existing pipeline in a small web service with two endpoints. `GET /health` is a plain liveness check that returns a fixed status, used to confirm the service is running before anything else is tested. `POST /ask` accepts a query and an optional `top_k`, runs the pipeline, and returns the answer alongside its status and timing breakdown.
+
+Request and response shapes are defined with Pydantic models, `AskRequest` and `AskResponse`, rather than reading raw JSON by hand. This means a request missing the `query` field, or sending the wrong type for `top_k`, is rejected automatically before the endpoint function ever runs, and the response always comes back in the same predictable shape.
+
+---
+
+## 18. Approach: structured logging and HTTP error responses
+
+Every request passes through a middleware in `src/main.py` that assigns it a short random id, logs when the request starts and when it finishes, and records the method, path, status code, and duration in milliseconds. Each log line is written as a single JSON object rather than a free form sentence, which makes it straightforward to search or filter logs later, for example by status code or by how long a request took. The request id is also returned in an `X-Request-ID` response header, so a specific request can be traced from the client side back to its log entries.
+
+Three categories of error are handled, and each is deliberately treated differently.
+
+A `400 Bad Request` is returned when the request was well formed but its content does not make sense, such as a query that is empty after trimming whitespace, or a `top_k` value outside the allowed range. These checks live directly inside `ask_question()`, since they depend on the specific meaning of the fields.
+
+A `422 Unprocessable Entity` is returned automatically by FastAPI and Pydantic when the request does not match the expected shape at all, for example a missing `query` field or a `top_k` sent as text instead of a number. A custom handler for this case, `validation_error_handler`, logs the validation errors and returns them in the same structured JSON format as everything else, rather than leaving FastAPI's default response untouched.
+
+A `500 Internal Server Error` is returned for anything unexpected that was not explicitly checked for, through a catch all handler, `unhandled_error_handler`. This handler logs the full exception type and message for debugging, but deliberately sends back only a generic message to the caller, since exposing internal error details such as a stack trace or an exception class name to an external client is a information disclosure risk rather than a helpful debugging aid for them.
+
+---
+
+## 19. Approach: retrieval evaluation
+
+`src/retrieval_eval.py` measures retrieval quality directly, rather than relying on spot checking a handful of queries by eye. `precision_at_k()` and `recall_at_k()` compare the ids ChromaDB actually returned against a manually curated list of ids known to be relevant for that query, which has to be built by hand since there is no automatic way to know which chunks in the corpus genuinely answer a given question.
+
+`evaluate_retrieval()` takes this test set together with a retrieval function, runs every query through it, and reports both the per query precision and recall and the averages across the whole set. The retrieval function itself is passed in as an argument rather than hard coded, which made it possible to first validate the precision and recall arithmetic against a small fake dataset before running it against the real ChromaDB collection and embedding model, keeping the correctness of the scoring logic separate from whether retrieval itself is working well.
+
+---
+
+## 20. Approach: end to end evaluation for generation quality and latency
+
+`src/generation_eval.py` runs the full retrieve and generate pipeline over a batch of test queries and scores two things at once. Quality is estimated with a simple keyword check in `check_quality()`, since fully judging whether a generated answer is correct would require another model to grade it, which adds cost and its own source of error. Instead, each test query can carry a small list of keywords that a correct answer should contain, and the score is the fraction of those keywords found in the actual answer. An out of domain query is given no keywords and no quality score, since its correct behaviour is to refuse rather than to answer.
+
+`summarize_results()` turns the per query results into an overall picture: how many queries fell into each status, `answered`, `refused_in_domain`, `out_of_domain`, or `api_error`, the average quality score across answered queries, and the average and maximum latency across retrieval, generation, and the full request. Tracking the status breakdown alongside the quality score matters, since a high average quality score calculated only over successfully answered queries can quietly hide a batch where a large fraction of queries failed outright.
+
+---
+
+## 21. Approach: unit tests for the FastAPI endpoints
+
+`tests/test_main.py` uses FastAPI's `TestClient` to exercise `/health` and `/ask` without starting a real server, which keeps the whole suite fast. The tests are grouped by what they are checking: successful responses and their shape, the two kinds of `400` validation (an empty query and an out of range `top_k`), the three kinds of `422` validation FastAPI produces automatically (a missing field, a wrong type, and a missing body entirely), and the `500` path, triggered deliberately through a special query value reserved for testing.
+
+One test, `test_ask_500_response_does_not_leak_internal_details`, checks something slightly different from the rest: not just that the status code is correct, but that the response body never contains the underlying exception's name or message. This exists specifically to catch a regression where someone editing `unhandled_error_handler` later accidentally exposes internal error details in the response that Section 18 explains should stay generic.
+
+---
+
+## 22. Setup
 
 Requires Python 3.10 or newer (developed on `<YOUR_PYTHON_VERSION>`).
 
@@ -310,7 +367,7 @@ Note that `torch` is large, several hundred megabytes on Linux and Windows, so t
 
 ---
 
-## 18. How to run
+## 23. How to run
 
 Always run commands from the project root.
 
@@ -346,6 +403,19 @@ python scripts/test_groq.py
 
 # 10. Run the full pipeline: retrieve, check relevance, generate, and log end to end latency
 python scripts/generate_answer.py
+
+# 11. Evaluate retrieval quality with Precision@K and Recall@K
+python scripts/evaluate_retrieval.py
+
+# 12. Evaluate generation quality and latency end to end
+python scripts/evaluate_generation.py
+
+# 13. Run the FastAPI unit tests
+python -m pytest tests/test_main.py -v
+
+# 14. Start the API server
+uvicorn src.main:app --reload
+#     interactive docs available at http://127.0.0.1:8000/docs
 ```
 
 Using the cleaning functions in your own code:
@@ -371,16 +441,22 @@ result = answer_question("What is deep learning?", model, collection)
 print(result["answer"], result["status"], result["total_ms"])
 ```
 
+Calling the API once it is running:
+
+```powershell
+curl -X POST http://127.0.0.1:8000/ask -H "Content-Type: application/json" -d "{\"query\": \"What is deep learning?\"}"
+```
+
 ---
 
-## 19. Results
+## 24. Results
 
 Environment verification:
 ```
 <PASTE THE OUTPUT OF: python scripts/verify_environment.py>
 ```
 
-Unit tests:
+Unit tests, pipeline:
 ```
 <PASTE THE OUTPUT OF: python -m pytest -v>
 ```
@@ -410,6 +486,21 @@ Answer generation with end to end latency:
 <PASTE THE OUTPUT OF: python scripts/generate_answer.py>
 ```
 
+Retrieval evaluation, Precision@K and Recall@K:
+```
+<PASTE THE OUTPUT OF: python scripts/evaluate_retrieval.py>
+```
+
+End to end generation evaluation:
+```
+<PASTE THE OUTPUT OF: python scripts/evaluate_generation.py>
+```
+
+FastAPI unit tests:
+```
+<PASTE THE OUTPUT OF: python -m pytest tests/test_main.py -v>
+```
+
 | Metric | Value |
 |---|---|
 | Raw documents | `<RAW_COUNT>` |
@@ -421,10 +512,14 @@ Answer generation with end to end latency:
 | Average retrieval latency | `<AVG_RETRIEVAL_MS>` ms |
 | Average generation latency | `<AVG_GENERATION_MS>` ms |
 | Average end to end latency | `<AVG_TOTAL_MS>` ms |
+| Average Precision@K | `<AVG_PRECISION>` |
+| Average Recall@K | `<AVG_RECALL>` |
+| Average generation quality score | `<AVG_QUALITY_SCORE>` |
+| FastAPI endpoint tests passing | `<API_TESTS_PASSED>` / `<API_TESTS_TOTAL>` |
 
 ---
 
-## 20. Design decisions and limitations
+## 25. Design decisions and limitations
 
 * `langdetect` is statistical. It can misjudge very short or mixed language text, so the pipeline only uses the first 1,000 characters, and validation checks a random sample rather than claiming complete accuracy.
 * NFKC normalization is lossy on purpose, for example superscripts and ligatures are flattened, which is good for search and embeddings but not suitable if the original typography must be preserved.
@@ -434,19 +529,22 @@ Answer generation with end to end latency:
 * Free tier LLM model ids on Groq change over time, as seen firsthand when `llama-3.3-70b-versatile` returned a 404 error after being retired. The model id is kept in one constant, and the live model list should be checked before each deployment.
 * The out of domain distance threshold is a heuristic tuned by manual inspection, not a learned or formally validated value, so it may need adjustment for a different embedding model or a different corpus.
 * Retry logic adds latency to failed requests by design, since waiting before retrying a rate limited or temporarily unreachable request is deliberate, but this means a persistently failing request takes longer to report its final error than a request that fails once.
+* The `500` handler intentionally sacrifices debugging convenience at the client for safety, by hiding exception details from the caller. Anyone debugging an issue needs to read the structured server logs rather than the API response itself.
+* Retrieval evaluation depends entirely on the manually built relevant id list in the test set. A test set that is too small or too narrow in topic coverage will produce precision and recall numbers that look better or worse than how the system actually performs across the full range of queries it might receive.
+* Generation quality scoring through keyword matching is a proxy for correctness, not a direct measurement of it. An answer can contain every expected keyword while still being phrased incorrectly, or can be correct while happening not to use the exact expected wording, so the quality score should be read as a rough signal rather than a precise grade.
 
 ---
 
-## 21. About the data files
+## 26. About the data files
 
-Raw and processed data are git ignored, under `data/`, because they are large and reproducible. To regenerate them, run steps 2, 4, and 5 in Section 18. A 20 document preview of the cleaned output is committed in `samples/clean_corpus_sample.jsonl`. The `.env` file holding the Groq API key is also git ignored and must be created locally.
+Raw and processed data are git ignored, under `data/`, because they are large and reproducible. To regenerate them, run steps 2, 4, and 5 in Section 23. A 20 document preview of the cleaned output is committed in `samples/clean_corpus_sample.jsonl`. The `.env` file holding the Groq API key is also git ignored and must be created locally.
 
 ---
 
-## 22. Tech stack
+## 27. Tech stack
 
-Python, sentence-transformers, PyTorch, Transformers, spaCy, pandas, NumPy, ChromaDB, langdetect, Hugging Face `datasets`, pytest, Groq, python-dotenv.
+Python, sentence-transformers, PyTorch, Transformers, spaCy, pandas, NumPy, ChromaDB, langdetect, Hugging Face `datasets`, pytest, Groq, python-dotenv, FastAPI, Uvicorn, httpx.
 
-## 23. Author
+## 28. Author
 
 Amna Ali, Parallax Labs Internship.
