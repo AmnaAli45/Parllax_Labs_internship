@@ -12,12 +12,11 @@ def retrieve_fn(query, k):
     return results["ids"][0]
 
 
-# Yeh test_set khud bana kar bharni hai -- apne corpus mein
-# kuch queries aur unke sahi chunk_ids dhoondh kar likhein.
+
 test_set = [
     {"query": "What is deep learning?", "relevant_ids": ["12_chunk0", "45_chunk2"]},
     {"query": "Who was Albert Einstein?", "relevant_ids": ["88_chunk1"]},
-    # ... aur 8-13 queries
+    
 ]
 
 avg_p, avg_r, details = evaluate_retrieval(test_set, retrieve_fn, k=5)
